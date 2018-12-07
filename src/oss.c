@@ -20,7 +20,7 @@ key_t clockKey, msgqueueKey;
 logical_clock *clock;
 FILE *logfile;
 char *file_name;
-int child_pids[18], child_count = 0, log_lines = 0, index = 0;
+int req,child_pids[18], child_count = 0, log_lines = 0, nextloc = 0, pf;
 long seed_value;
 Queue* blockedqueue;
 FrameTable frames;
@@ -32,6 +32,7 @@ shmdt((void *)clock);
 fprintf(stderr,"Closing File \n");
 fclose(logfile);
 fprintf(stderr, "Child Forked %d \n", child_count); 
+fprintf(stderr, "Faults Total Vs Requests %d ---- %d \n", pf, req);
 fprintf(stderr, "OSS started detaching all the shared memory segments \n");
 shmctl(clockId, IPC_RMID, NULL);
 msgctl(msgqueueId, IPC_RMID, NULL);
@@ -53,30 +54,31 @@ int checkFrameAvailability(int memory)
 {
 	//framestatus = 1; for occupied 
 	//framestatus = -1 unoccupied
+	pf++;
 	int r;
-	while(pages.pagestatus[index] == 1)
+	while(pages.pagestatus[nextloc] == 1)
 	{
-		pages.pagestatus[index] = 0;
-		frames.reference[pages.page[index]] = 1;
-		index = (index+1)%32;
+		pages.pagestatus[nextloc] = 0;
+		frames.reference[pages.page[nextloc]] = 0;
+		nextloc = (nextloc+1)%32;
 	}
 		
-	int firstIndex = pages.page[index];
+	int firstIndex = pages.page[nextloc];
 	if(firstIndex != -1)
 	{
 		frames.reference[firstIndex] = -1;
-		frames.framestatus[firstIndex] = -1;
-		frames.frame[firstIndex] = 5;	
+		frames.framestatus[firstIndex] = '.';
+		frames.frame[firstIndex] = -1;	
 	}
 
 	//Found an empty page and adding memory value to that
 	//0 for used, 1 for dirty, 2 for second chance
-	pages.page[index] = memory;
-	frames.frame[memory] = index;
-	pages.pagestatus[index] = 0;
+	pages.page[nextloc] = memory;
+	frames.frame[memory] = nextloc;
+	pages.pagestatus[nextloc] = 0;
 	frames.reference[memory] = 0;
-	index = (index+1) % 32;
-	return index;
+	nextloc = (nextloc+1) % 32;
+	return nextloc;
 }
 
 
@@ -106,18 +108,22 @@ void printData()
 	int l;
 	fprintf(stderr, "Frame Layout \n");
 
+	for(l = 0; l< 32; l++)
+	fprintf(stderr, "%d ", pages.page[l]);
+	fprintf(stderr, "\n");
+
+	/*for(l = 0; l< 32; l++)
+        fprintf(stderr, "%d ", pages.pagestatus[l]);
+        fprintf(stderr, "\n");		
+	*/
+	
 	for(l = 0; l<256; l++) 
 	{
-	if(frames.reference[l] == -1)
-		fprintf(stderr, ".");
-	else if(frames.reference[l] == 0)
-		fprintf(stderr, "U");
-	else
-		fprintf(stderr, "D");
-	
+		if(frames.framestatus[l] != '.')
+		fprintf(stderr, "%c:%d ", frames.framestatus[l],l);
 	}
-	frprintf(stderr, "\n");
-	frprintf(stderr, "=====================================================================================\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "=====================================================================================\n");
 
 }
 
@@ -183,14 +189,14 @@ int m, n;
 for(m = 0; m < 32; m++)
 {
 	pages.page[m] = -1;
-	pages.pagestatus[m] = -1;
+	pages.pagestatus[m] = 0;
 }
 
 for(n = 0; n< 256; n++)
 {
 	frames.frame[n] = -1;
 	frames.reference[n] = -1;
-	frames.framestatus[n] = -1;
+	frames.framestatus[n] = '.';
 
 }
 clock -> seconds = 0;
@@ -198,20 +204,20 @@ clock -> nanoseconds = 0;
 
 pid_t mypid;
 int nextspawntime;
-int index = -1,b, next_child_time_nano, next_child_time_sec;
+int emptyloc = -1,b, next_child_time_nano, next_child_time_sec;
 while(1)
 {
-		index = -1;
+		emptyloc = -1;
 		for(b = 0; b< 18; b++)
 		{
 			if(child_pids[b] == 0)
 			{
-			index = b;
+			emptyloc = b;
 			break;
 			}
 		}
 		
-		if((index >= 0))
+		if((emptyloc >= 0))
 		{
 			if((mypid = fork()) ==0)
 			{
@@ -227,7 +233,7 @@ while(1)
 			exit(0); 
 			}
 		child_count++;
-		child_pids[index] = mypid;
+		child_pids[emptyloc] = mypid;
 		}
 
 		srand(seed_value++);
@@ -235,34 +241,48 @@ while(1)
 
 	if((msgrcv(msgqueueId,  &msgqueue, sizeof(msgqueue), 1, IPC_NOWAIT)) != -1)
 	{
+		int frameId;
+		req++;
+		int address = msgqueue.memreq;
+                int address_val = address / 1000;
+                int pageadd =  getpagetable(address_val);
+                if(pageadd == -1)
+		{
+		
+                int update = checkFrameAvailability(address_val);
+                }
+		else
+                {
+                        frameId = pages.page[pageadd];
+                        frames.reference[address_val] = 1;
+                        pages.pagestatus[pageadd] = 1;
+		//	fprintf(stderr, "FrameId %d ----- Address %d \n", frameId, address_val);
+                }
+
 	if(msgqueue.rwflag == 0)         //Read Operation
 	{
 		int processId = msgqueue.processNumber;
-		int index = getIndexById(processId);
-		int address = msgqueue.memreq;
-		int adrress_val = address / 1000;
-		//int pageadd =  getpagetable(address_val);	
-		//if(pageadd == -1)
-		//int update = frameNotAvaialable(adrress_val);				
-		fprintf(stderr, "OSS: Process Id %d requesting Read %d \n", processId,address);	
+		fprintf(stderr, "OSS: Process Id %d requesting Read %d \n", processId,address);
+		frames.framestatus[address_val] = 'U';
+		printData();
 		msgqueue.msg_type = processId;
 		msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
 	}
 	else if(msgqueue.rwflag == 1)	// Write Operation
 	{
 		int processId = msgqueue.processNumber;
-                int index = getIndexById(processId);
-                int address = msgqueue.memreq;
 		fprintf(stderr, "OSS: Process Id %d requesting Write %d \n", processId,address);
+		frames.framestatus[address_val] = 'D';
+		printData();
 		msgqueue.msg_type = processId;
 		msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
 	}
 	else
 	{
 		int processId = msgqueue.processNumber;
-                int index = getIndexById(processId);
+                int pidloc = getIndexById(processId);
 		fprintf(stderr, "Process pid %d Terminating \n", processId);
-		child_pids[index] = 0;
+		child_pids[pidloc] = 0;
 		waitpid(processId, &status, 0);
 	}
 	}
