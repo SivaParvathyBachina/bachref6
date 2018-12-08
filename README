@@ -1,0 +1,32 @@
+The structure in hoare server is 
+		
+		bachina.6  --->   Makefile
+				  src   --------> oss.c, user.c, shared_mem.h, priority_queue.h
+				  README
+				  Logfile With the User Specified Name ("Default", if none specified)
+				  Gitlog
+
+
+Sample Execution Format: ./oss -l [logfilename] -h [help] 
+
+To run the project: cd to bachina.6 folder: make all, All the executables will be generated.
+
+and then give the command ./oss -l log_filename 
+
+To remove the object files give command,  make clean
+
+The termination criteria for this project is 2 real life seconds.
+
+========================================================================
+
+There are 2 files named oss.c and user.c
+
+Shared_mem.h is a header file that holds the structure of the oss clock. Oss clock has seconds and nanoseconds. 
+Frame and page Tables are being used to store the status of the individual frames and pages.
+Message queues are implemented for user and OSS to share the messages. msgqueue is a structure that holds different properties of the message. 
+
+User will send a message to the OSS (Either Read Or Write), and if the page is available, it will be given and if not, A second chance algorithm will be run, 
+on which frame to be replaced. 
+The output is written to the logfile that is specified by the user. After 100,000 lines the output will not be logged. 
+
+All the files are pushed to github.

@@ -20,7 +20,7 @@ key_t clockKey, msgqueueKey;
 logical_clock *clock;
 FILE *logfile;
 char *file_name;
-int req,child_pids[18], child_count = 0, log_lines = 0, nextloc = 0, pf;
+int req, printvar, child_pids[18], child_count = 0, log_lines = 0, nextloc = 0, pf;
 long seed_value;
 Queue* blockedqueue;
 FrameTable frames;
@@ -31,12 +31,17 @@ Queue* timeq;
 Queue* reqtypeq;
 
 void clearSharedMemory() {
+fprintf(stderr, "Child Forked %d \n", child_count);
+fprintf(stderr, "Faults Total Vs Requests %d ---- %d \n", pf, req);
+int stat = (int) req/(clock -> seconds);
+fprintf(logfile, "****************** STATISTICS ********************** \n");
+fprintf(stderr, "Number of Memory Accesses per second %d \n",stat);
+int stat2 = (int) pf / (clock -> seconds); 
+fprintf(stderr, "Number of Pagefaults per second %d \n", stat2);
 fprintf(stderr, "------------------------------- CLEAN UP ----------------------- \n");
 shmdt((void *)clock);
 fprintf(stderr,"Closing File \n");
 fclose(logfile);
-fprintf(stderr, "Child Forked %d \n", child_count); 
-fprintf(stderr, "Faults Total Vs Requests %d ---- %d \n", pf, req);
 fprintf(stderr, "OSS started detaching all the shared memory segments \n");
 shmctl(clockId, IPC_RMID, NULL);
 msgctl(msgqueueId, IPC_RMID, NULL);
@@ -76,13 +81,16 @@ int checkFrameAvailability(int memory)
 	}
 
 	//Found an empty page and adding memory value to that
-	//0 for used, 1 for dirty, 2 for second chance
 	pages.page[nextloc] = memory;
 	frames.frame[memory] = nextloc;
 	pages.pagestatus[nextloc] = 0;
 	frames.reference[memory] = 0;
 	nextloc = (nextloc+1) % 32;
-	return nextloc;
+	int ret = nextloc -1;
+	if (ret == -1)
+		return 31;
+	fprintf(logfile, "Master: Clearing Frame %d and swapping in page %d \n ",firstIndex, ret);
+	return ret;
 }
 
 
@@ -108,26 +116,33 @@ int getpagetable(int memory)
 
 void printData()
 {
-	fprintf(stderr, "Current Memory layout at time is \n");
+	printvar = 0;
+	fprintf(logfile, "====================================================================================\n");
+	fprintf(logfile, "Master: Memory layout at time %d:%d \n", clock -> seconds, clock -> nanoseconds);
 	int l;
-	fprintf(stderr, "Frame Layout \n");
+	fprintf(logfile, "Master: Page Table Status \n");
 
 	for(l = 0; l< 32; l++)
-	fprintf(stderr, "%d ", pages.page[l]);
-	fprintf(stderr, "\n");
-
-	/*for(l = 0; l< 32; l++)
-        fprintf(stderr, "%d ", pages.pagestatus[l]);
-        fprintf(stderr, "\n");		
-	*/
+	fprintf(logfile, "%d ", pages.page[l]);
+	fprintf(logfile, "\n");
 	
-	for(l = 0; l<256; l++) 
+	
+	fprintf(logfile, "Master: FrameTable Status \n");
+	for(l = 0; l< 256; l++)
 	{
-		//if(frames.framestatus[l] != '.')
-		fprintf(stderr, "%c", frames.framestatus[l]);
+		fprintf(logfile, "%c ", frames.framestatus[l]);
 	}
-	fprintf(stderr, "\n");
-	fprintf(stderr, "=====================================================================================\n");
+	fprintf(logfile, "\n");
+        for(l = 0; l< 256; l++)
+        {
+		if(frames.reference[l] == -1)
+		fprintf(logfile, "%c ", '.');
+		else
+                fprintf(logfile, "%d ", frames.reference[l]);
+        }
+	
+	fprintf(logfile, "\n");
+	fprintf(logfile, "=====================================================================================\n");
 
 }
 
@@ -139,7 +154,7 @@ int checkIfTimePassed()
 	{
 	float clocktime = clock -> nanoseconds + (clock -> seconds * NANOSECOND);
 	double value = clocktime / 1000000; 
-	if(timefirst > value )
+	if(timefirst < value )
 	{
 		int ele = dequeue(timeq);
 		return 1;
@@ -227,7 +242,7 @@ addressq = create_queue(20);
 timeq = create_queue(20);
 reqtypeq = create_queue(20);
 pid_t mypid;
-int nextspawntime;
+int nextspawntime, t = 0;
 int emptyloc = -1,b, next_child_time_nano, next_child_time_sec;
 while(1)
 {
@@ -264,13 +279,13 @@ while(1)
 		nextspawntime += rand() % 4;
 
 	if((msgrcv(msgqueueId,  &msgqueue, sizeof(msgqueue), 1, IPC_NOWAIT)) != -1)
-	{
+	{	
 		int readorwrite = msgqueue.rwflag;
 		if(readorwrite == 2)
                 {
                 int processId = msgqueue.processNumber;
                 int pidloc = getIndexById(processId);
-                fprintf(stderr, "Process pid %d Terminating \n", processId);
+                fprintf(logfile, "Master: Process pid %d Terminating \n", processId);
                 child_pids[pidloc] = 0;
                 waitpid(processId, &status, 0);
                 }
@@ -278,6 +293,7 @@ while(1)
 		{
 		int frameId;
 		req++;
+		printvar++;
 		int processId = msgqueue.processNumber;
 		int address = msgqueue.memreq;
                 int address_val = address / 1000;
@@ -287,8 +303,8 @@ while(1)
 		double total = 15 + incrementer;
                 if(pageadd == -1)
 		{
-                int update = checkFrameAvailability(address_val);
-		fprintf(stderr, "Blocking process %d request for %d address location \n", processId, address);
+		fprintf(logfile, "Master: Address %d is not in frame. PageFault \n", address);
+		fprintf(logfile, "Master: Blocking process %d request for %d address location \n", processId, address);
 		enqueue(processq, processId);
 		enqueue(addressq, address);
 		enqueue(timeq,total);
@@ -302,17 +318,17 @@ while(1)
 
 		if(readorwrite == 0)         //Read Operation
 		{	
-		fprintf(stderr, "OSS: Process Id %d requesting Read %d \n", processId,address);
-		frames.framestatus[address_val] = 'U';
-		printData();
+		fprintf(logfile, "Master: Process Id %d requesting Read of address %d at %d:%d\n", processId,address, clock -> seconds, clock -> nanoseconds);
+		frames.framestatus[address / 1000] = 'U';
+		fprintf(logfile, "Master: Address %d in frame %d giving data to process %d at %D:%d \n", address, frameId, processId, clock -> seconds, clock -> nanoseconds);	
 		msgqueue.msg_type = processId;
 		msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
 		}
 		else 				// Write Operation
 		{
-		fprintf(stderr, "OSS: Process Id %d requesting Write %d \n", processId,address);
-		frames.framestatus[address_val] = 'D';
-		printData();
+		fprintf(logfile, "Master: Process Id %d requesting Write of address %d at %d:%d\n", processId,address, clock -> seconds, clock -> nanoseconds);
+		frames.framestatus[address / 1000] = 'D';
+		fprintf(logfile, "Master: Address %d is written to frame %d by process %d at %D:%d \n", address, frameId, processId, clock -> seconds, clock -> nanoseconds);
 		msgqueue.msg_type = processId;
 		msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
 		}
@@ -323,12 +339,14 @@ while(1)
         	clock -> seconds += (clock -> nanoseconds) / NANOSECOND;
         	clock -> nanoseconds = (clock -> nanoseconds) % NANOSECOND;
         	}
+		if(printvar >= 50)
+		printData();
 	}
 	}
 	
 	else
 	{
-	clock -> nanoseconds += 100;
+	clock -> nanoseconds += 10000;
 	if(clock -> nanoseconds >= NANOSECOND) 
 	{
 	clock -> seconds += (clock -> nanoseconds) / NANOSECOND;
@@ -341,25 +359,26 @@ while(1)
                         int pId = (int) dequeue(processq);
                         int addre = (int) dequeue(addressq);
 			int rw = (int) dequeue(reqtypeq);
-			fprintf(stderr, "Unblocking process %d request for %d address location \n", pId, addre);
+			fprintf(logfile, "Master: Unblocking process %d request for %d address location \n", pId, addre);
 			int uploc = checkFrameAvailability(addre / 1000);
 			if(rw == 0)
 			{
-				fprintf(stderr, "OSS: Process Id %d finished Write %d \n", pId,addre);
-	        	        frames.framestatus[addre / 1000] = 'D';
-        	        	printData();
+	        	         fprintf(logfile, "Master: Address %d is Read by process %d at %d:%d \n", addre, pId, clock -> seconds, clock -> nanoseconds);
+				frames.framestatus[addre / 1000] = 'U';
+				msgqueue.msg_type = pId;
+                        	msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
 			}
 			else
 			{
-				 fprintf(stderr, "OSS: Process Id %d finished Write %d \n", pId,addre);
-                                frames.framestatus[addre/1000] = 'U';
-                                printData();	
+                                fprintf(logfile, "Master: Address %d is written by process %d at %d:%d \n", addre, pId, clock -> seconds, clock -> nanoseconds);
+				frames.framestatus[addre / 1000] = 'D';
+				msgqueue.msg_type = pId;
+                        	msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);	
 			}
 			
-                	msgqueue.msg_type = pId;
-                	msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
+		if(printvar >= 50)
+		printData();
 		}
-			
 }
 return 0;
 }
