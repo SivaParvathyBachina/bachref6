@@ -25,6 +25,10 @@ long seed_value;
 Queue* blockedqueue;
 FrameTable frames;
 PageTable pages;
+Queue* processq;
+Queue* addressq;
+Queue* timeq;
+Queue* reqtypeq;
 
 void clearSharedMemory() {
 fprintf(stderr, "------------------------------- CLEAN UP ----------------------- \n");
@@ -119,13 +123,31 @@ void printData()
 	
 	for(l = 0; l<256; l++) 
 	{
-		if(frames.framestatus[l] != '.')
-		fprintf(stderr, "%c:%d ", frames.framestatus[l],l);
+		//if(frames.framestatus[l] != '.')
+		fprintf(stderr, "%c", frames.framestatus[l]);
 	}
 	fprintf(stderr, "\n");
 	fprintf(stderr, "=====================================================================================\n");
 
 }
+
+
+int checkIfTimePassed()
+{
+	double timefirst = front_item(timeq);
+	if(timefirst > 0)
+	{
+	float clocktime = clock -> nanoseconds + (clock -> seconds * NANOSECOND);
+	double value = clocktime / 1000000; 
+	if(timefirst > value )
+	{
+		int ele = dequeue(timeq);
+		return 1;
+	}
+	}
+	return -1;
+}
+
 
 void myhandler(int s) {
 if(s == SIGALRM)
@@ -161,7 +183,6 @@ case '?':
         return 1;
 }
 
-blockedqueue = create_queue(20);
 signal(SIGALRM, myhandler);
 alarm(2);
 signal(SIGINT, myhandler);
@@ -201,7 +222,10 @@ for(n = 0; n< 256; n++)
 }
 clock -> seconds = 0;
 clock -> nanoseconds = 0;
-
+processq = create_queue(20);
+addressq = create_queue(20);
+timeq = create_queue(20);
+reqtypeq = create_queue(20);
 pid_t mypid;
 int nextspawntime;
 int emptyloc = -1,b, next_child_time_nano, next_child_time_sec;
@@ -241,58 +265,101 @@ while(1)
 
 	if((msgrcv(msgqueueId,  &msgqueue, sizeof(msgqueue), 1, IPC_NOWAIT)) != -1)
 	{
+		int readorwrite = msgqueue.rwflag;
+		if(readorwrite == 2)
+                {
+                int processId = msgqueue.processNumber;
+                int pidloc = getIndexById(processId);
+                fprintf(stderr, "Process pid %d Terminating \n", processId);
+                child_pids[pidloc] = 0;
+                waitpid(processId, &status, 0);
+                }
+		else
+		{
 		int frameId;
 		req++;
+		int processId = msgqueue.processNumber;
 		int address = msgqueue.memreq;
                 int address_val = address / 1000;
                 int pageadd =  getpagetable(address_val);
+		double clocknano = clock -> nanoseconds + (clock -> seconds * NANOSECOND);
+		double incrementer = clocknano / 1000000;
+		double total = 15 + incrementer;
                 if(pageadd == -1)
 		{
-		
                 int update = checkFrameAvailability(address_val);
+		fprintf(stderr, "Blocking process %d request for %d address location \n", processId, address);
+		enqueue(processq, processId);
+		enqueue(addressq, address);
+		enqueue(timeq,total);
+		enqueue(reqtypeq, readorwrite);
                 }
 		else
                 {
                         frameId = pages.page[pageadd];
                         frames.reference[address_val] = 1;
                         pages.pagestatus[pageadd] = 1;
-		//	fprintf(stderr, "FrameId %d ----- Address %d \n", frameId, address_val);
-                }
 
-	if(msgqueue.rwflag == 0)         //Read Operation
-	{
-		int processId = msgqueue.processNumber;
+		if(readorwrite == 0)         //Read Operation
+		{	
 		fprintf(stderr, "OSS: Process Id %d requesting Read %d \n", processId,address);
 		frames.framestatus[address_val] = 'U';
 		printData();
 		msgqueue.msg_type = processId;
 		msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
-	}
-	else if(msgqueue.rwflag == 1)	// Write Operation
-	{
-		int processId = msgqueue.processNumber;
+		}
+		else 				// Write Operation
+		{
 		fprintf(stderr, "OSS: Process Id %d requesting Write %d \n", processId,address);
 		frames.framestatus[address_val] = 'D';
 		printData();
 		msgqueue.msg_type = processId;
 		msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
-	}
-	else
-	{
-		int processId = msgqueue.processNumber;
-                int pidloc = getIndexById(processId);
-		fprintf(stderr, "Process pid %d Terminating \n", processId);
-		child_pids[pidloc] = 0;
-		waitpid(processId, &status, 0);
+		}
+		}
+		clock -> nanoseconds += 10;
+        	if(clock -> nanoseconds >= NANOSECOND)
+        	{
+        	clock -> seconds += (clock -> nanoseconds) / NANOSECOND;
+        	clock -> nanoseconds = (clock -> nanoseconds) % NANOSECOND;
+        	}
 	}
 	}
 	
-	clock -> nanoseconds += 1000;
+	else
+	{
+	clock -> nanoseconds += 100;
 	if(clock -> nanoseconds >= NANOSECOND) 
 	{
 	clock -> seconds += (clock -> nanoseconds) / NANOSECOND;
 	clock -> nanoseconds = (clock -> nanoseconds) % NANOSECOND;
 	}
+	}
+	
+		if(checkIfTimePassed() > 0)
+                {
+                        int pId = (int) dequeue(processq);
+                        int addre = (int) dequeue(addressq);
+			int rw = (int) dequeue(reqtypeq);
+			fprintf(stderr, "Unblocking process %d request for %d address location \n", pId, addre);
+			int uploc = checkFrameAvailability(addre / 1000);
+			if(rw == 0)
+			{
+				fprintf(stderr, "OSS: Process Id %d finished Write %d \n", pId,addre);
+	        	        frames.framestatus[addre / 1000] = 'D';
+        	        	printData();
+			}
+			else
+			{
+				 fprintf(stderr, "OSS: Process Id %d finished Write %d \n", pId,addre);
+                                frames.framestatus[addre/1000] = 'U';
+                                printData();	
+			}
+			
+                	msgqueue.msg_type = pId;
+                	msgsnd(msgqueueId, &msgqueue, sizeof(msgqueue), 0);
+		}
+			
 }
 return 0;
 }
